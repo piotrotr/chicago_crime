@@ -1,0 +1,785 @@
+---
+title: "Przestępczość w Chicago"
+author: "Piotr Otręba"
+date: "2025-05-03"
+output: 
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+## Część 1. Obróbka danych. 
+
+```{r}
+library(tidyverse)
+library(forecast)
+library(tseries)
+library(urca)
+```
+
+Analiza obejmie podzbiór danych dotyczących przestępczości w Chicago w latach 2016-2020. 
+
+```{r}
+setwd("C:\\Users\\48799\\OneDrive - Akademia Górniczo-Hutnicza im. Stanisława Staszica w Krakowie\\4_semestr\\Ekonometria\\ćw_laboratoryjne")
+data <- read.csv("2016-2020-chicago-crime.csv")
+```
+
+Podstawowa inspekcja danych.
+```{r, include=FALSE}
+str(data)
+```
+
+Usuwamy nieistotne z punktu widzenia analizy zmienne. 
+```{r}
+data <- data %>% select( -c("X", "ID", "Case.Number", "Location", "Updated.On")) 
+data <- data %>% rename("Type" = "Primary.Type")
+```
+
+Wyświetlamy unikatowe kategorie przestępstw.
+```{r}
+unique(data$Type)
+```
+Grupujemy przestępstwa w większe kategorie.
+```{r}
+data <- data %>%
+  mutate(Type = case_when(
+    grepl("NON\\s?-\\s?CRIMINAL", Type) ~ "NON-CRIMINAL",
+    grepl("NARCOTIC", Type) ~ "NARCOTICS",
+    .default = Type
+  ))
+```
+
+Podobnie, grupujemy opis lokalizacji, gdzie doszło do przestępstwa.Nazw lokalizacji jest na tyle dużo, że nie będziemy ich wyświetlać w sprawozdaniu. 
+```{r, include=FALSE}
+unique(data$Location.Description)
+```
+
+
+```{r}
+data <- data %>%
+  mutate(Location_Category = case_when(
+    # Lokalizacje mieszkalne
+    grepl("RESIDENCE|APARTMENT|CHA APARTMENT|HOUSE|NURSING HOME|RETIREMENT HOME|ROOMING HOUSE|DRIVEWAY - RESIDENTIAL|RESIDENCE-GARAGE|RESIDENCE - GARAGE|RESIDENCE PORCH|RESIDENCE - PORCH|RESIDENTIAL YARD|RESIDENCE - YARD", Location.Description, ignore.case = TRUE) ~ "Residential",
+    
+    # Sklepy, biura, komercja
+    grepl("COMMERCIAL|BUSINESS OFFICE|RETAIL|STORE|DEPARTMENT STORE|SMALL RETAIL|GROCERY|CONVENIENCE STORE|DRUG STORE|PAWN SHOP|TAVERN/LIQUOR|LIQUOR STORE|NEWSSTAND|APPLIANCE STORE|CLEANING STORE|AUTO / BOAT / RV DEALERSHIP", Location.Description, ignore.case = TRUE) ~ "Commercial",
+    
+    # Instytucje finansowe
+    grepl("BANK|CURRENCY EXCHANGE|ATM|SAVINGS AND LOAN|CREDIT UNION", Location.Description, ignore.case = TRUE) ~ "Financial",
+    
+    # Usługi
+    grepl("OFFICE|MEDICAL/DENTAL|MEDICAL / DENTAL|ANIMAL HOSPITAL|BARBERSHOP|BARBER SHOP/BEAUTY SALON", Location.Description, ignore.case = TRUE) ~ "Office/Service",
+    
+    # Związane z taksówkami, samochodami
+    grepl("VEHICLE|CAR WASH|AUTO|TAXICAB|RIDE SHARE|UBER|LYFT|DELIVERY TRUCK|GARAGE/AUTO REPAIR", Location.Description, ignore.case = TRUE) ~ "Vehicle",
+    
+    # Parkingi
+    grepl("PARKING LOT|GARAGE \\(NON|DRIVEWAY", Location.Description, ignore.case = TRUE) ~ "Parking",
+    
+    # Drogi i chodniki publiczne
+    grepl("STREET|HIGHWAY|EXPRESSWAY|SIDEWALK|ALLEY|BRIDGE", Location.Description, ignore.case = TRUE) ~ "Public Roads",
+    
+    # Stacja benzynowa
+    grepl("GAS STATION", Location.Description, ignore.case = TRUE) ~ "Gas Station",
+    
+    # Parki i tereny zielone
+    grepl("PARK PROPERTY|FOREST PRESERVE|WOODED AREA|LAKEFRONT|WATERFRONT|RIVERBANK|RIVER BANK|LAKE|LAGOON", Location.Description, ignore.case = TRUE) ~ "Outdoor Green Areas",
+    
+    # Komunikacja miejska
+    grepl("CTA|TRAIN|BUS|SUBWAY|PLATFORM|OTHER RAILROAD", Location.Description, ignore.case = TRUE) ~ "Public Transit",
+    
+    # Lotnisko
+    grepl("AIRPORT|AIRCRAFT", Location.Description, ignore.case = TRUE) ~ "Airport",
+    
+    # Statki
+    grepl("BOAT|WATERCRAFT", Location.Description, ignore.case = TRUE) ~ "Water/Maritime",
+    
+    # Placówki oświatowe
+    grepl("SCHOOL|COLLEGE|UNIVERSITY", Location.Description, ignore.case = TRUE) ~ "Educational Institutions",
+    
+    # Instytucje federalne
+    grepl("GOVERNMENT|FEDERAL|POLICE|JAIL|LOCK-UP|FIRE STATION", Location.Description, ignore.case = TRUE) ~ "Government/Security",
+    
+    # Służba zdrowia
+    grepl("HOSPITAL|NURSING|RETIREMENT HOME", Location.Description, ignore.case = TRUE) ~ "Healthcare",
+    
+    # Miejsca kultu
+    grepl("CHURCH|SYNAGOGUE|PLACE OF WORSHIP|CEMETARY", Location.Description, ignore.case = TRUE) ~ "Religious",
+    
+    # Rozrywka i rekreacja
+    grepl("RESTAURANT|BAR|TAVERN|CLUB|POOL ROOM|ATHLETIC|SPORTS|STADIUM|MOVIE|THEATER|BOWLING", Location.Description, ignore.case = TRUE) ~ "Indoor Entertainment/Sports",
+    
+    # Hotele
+    grepl("HOTEL|MOTEL", Location.Description, ignore.case = TRUE) ~ "Accommodation",
+    
+    # Tereny przemysłowe / plac budowy
+    grepl("WAREHOUSE|FACTORY|MANUFACTURING|CONSTRUCTION", Location.Description, ignore.case = TRUE) ~ "Industrial",
+    
+    # Wnętrza budynków
+    grepl("HALLWAY|STAIRWELL|VESTIBULE|ELEVATOR|PORCH|BASEMENT|YARD", Location.Description, ignore.case = TRUE) ~ "Building Areas",
+    
+    # Inne
+    grepl("OTHER|SPECIFY", Location.Description, ignore.case = TRUE) ~ "Other",
+    
+    # Nieznane
+    Location.Description == "" ~ "Unknown",
+    
+    # Wszystko inne
+    TRUE ~ "Miscellaneous"
+  ))
+```
+
+
+## Część 2. Analiza danych.
+
+Sprawdźmy, gdzie doszło do największej liczby przestępstw. 
+```{r}
+data %>% 
+  group_by(Location_Category) %>%
+  count() %>% 
+  ggplot(aes(y=reorder(Location_Category, n), x=n)) + 
+  geom_col(fill="lightblue", color="darkblue") + 
+  theme_bw() + 
+  scale_x_continuous(breaks= seq(5e4, 3e5, 5e4), labels = function(x) {x/1000}) +
+  labs(title="Liczba przestępstw według ich lokalizacji",
+       subtitle="Lata 2016-2020",
+       y = "Lokalizacja przestępstwa",
+       x = "Liczba przestępstw (tys.)")
+```
+
+Dla każdej lokalizacji wyświetlamy 3 najczęściej popełniane tam typy przzestępstw. 
+```{r}
+data %>%
+  group_by(Location_Category, Type) %>%
+  summarize(count = n(), .groups = "drop") %>%
+  group_by(Location_Category) %>%
+  slice_max(order_by = count, n = 3)
+```
+
+Wyświetlamy 10 ogółem najczęściej popełnianych przestępstw. 
+```{r}
+num_crimes <- data %>% group_by(Type) %>% count() %>% arrange(desc(n))
+num_crimes
+```
+
+Najczęściej dokonywanym typem przestępstwa była kradzież, na drugim miejscu pobicie, a na trzecim uszkodzenie mienia. Przedstawmy to na wykresie.
+```{r}
+num_crimes %>% 
+  head(10) %>%
+  ggplot(aes(y=reorder(Type, n), x=n)) + 
+  geom_col(fill="lightblue", color="darkblue") + 
+  theme_bw() + 
+  scale_x_continuous(breaks= seq(5e4, 3e5, 5e4), labels = function(x) {x/1000}) +
+  labs(title="Liczba przestępstw według ich rodzaju",
+       subtitle="10 najczęściej popełnianych przestępstw",
+       y = "Rodzaj przestępstwa",
+       x = "Liczba przestępstw (tys.)")
+```
+
+Sprawdźmy też najrzadziej popełniane przestępstwa. 
+```{r}
+num_crimes %>% 
+  tail(20) %>%
+  ggplot(aes(y=reorder(Type, n), x=n)) + 
+  geom_col(fill="lightblue", color="darkblue") + 
+  theme_bw() + 
+  scale_x_continuous(breaks = seq(0, 12000, 3000)) +
+  labs(title="Liczba przestępstw według ich rodzaju",
+       subtitle="20 najrzadziej popełnianych przestępstw",
+       y = "Rodzaj przestępstwa",
+       x = "Liczba przestępstw")
+```
+
+Zobaczmy bardziej szczegółowo, jakie kradzieże były dokonywane. 
+```{r}
+theft_types <- data %>%
+  filter(Type == "THEFT") %>%
+  group_by(Description) %>%
+  count() %>%
+  arrange(desc(n))
+theft_types
+```
+
+
+Najwięcej było kradzieży zaklasyfikowanych jako kradzież mienia o wartości nieprzekraczającej 500$. 
+Sprawdzamy, czy występują wartości brakujące. 
+```{r}
+sapply(names(data), function(col) {sum(is.na(data$col))})
+```
+
+Wartości brakujące nie występują. 
+
+Przekształcamy kolumnę z datą i godziną popełnienia przestępstwa.
+```{r}
+
+data <- data %>% mutate(Date = as_datetime(Date, format = "%m/%d/%Y %I:%M:%S %p"))
+```
+
+
+### Liczba przestępstw w zależności od pory dnia. 
+
+Tworzymy ramkę danych zawierającą liczbę przestępstw danego typu pogrupowanych wg godziny. 
+```{r}
+crimes_by_hour <- data %>%
+  mutate(hour = hour(Date)) %>%
+  group_by(hour) %>%
+  summarize(num_crimes = n())
+
+
+  
+ggplot(crimes_by_hour, aes(x=hour, y=num_crimes)) + 
+  geom_smooth(method="loess", formula= y~x, alpha=0.25, color="darkgray") + 
+  geom_point(color = "blue") + 
+  scale_y_continuous(breaks = seq(0, 8e4, 2e4), labels = function(x) x/1000) + 
+  expand_limits(y=0) + 
+  scale_x_continuous(breaks = seq(0, 23, 2), labels = function(x) paste(x, "00", sep=":")) + 
+  labs(title = "Liczba przestępstw w ciągu dnia",
+       subtitle = "Lata 2016-2020",
+       x = "Godzina",
+       y = "Liczba przestępstw (tys.)") + 
+  theme_bw()
+  
+```
+
+Najwięcej przestępstw (prawie 80 tys.) ma miejsce w godzinach południowych. Wiele przestępstw, bo około 70 tys., jest także popełnianych w godzinach popołudniowych i wczesnym wieczorem (15:00-19:00).
+
+Sprawdźmy, czy różne przestępstwa są popełniane częściej o określonych porach dnia. 
+```{r}
+crime_types_by_hour <- data %>%
+  mutate(hour = hour(Date)) %>%
+  group_by(hour, Type) %>%
+  count()
+
+crime_types_by_hour %>%
+filter(Type %in% c("THEFT", "BATTERY", "ASSAULT", "CRIMINAL DAMAGE", "DECEPTIVE PRACTICE")) %>%
+ggplot(aes(x=hour, y=n, color= Type)) + 
+  geom_smooth(method="loess", formula= y~x, alpha=0.25, se=F) + 
+  geom_point() + 
+  scale_y_continuous(breaks = seq(0, 2e4, 5e3), labels = function(x) x/1000) + 
+  expand_limits(y=0) + 
+  scale_x_continuous(breaks = seq(0, 23, 2), labels = function(x) paste(x, "00", sep=":")) + 
+  labs(title = "Liczba przestępstw w ciągu dnia",
+       subtitle = "Lata 2016-2020",
+       x = "Godzina",
+       y = "Liczba przestępstw (tys.)",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw()
+```
+
+Najwięcej kradzieży ma miejsce w godz. 14:00-18:00. W przypadku pobicia i uszkodzenia mienia od godzin porannych następuje stopniowy wrost liczby tych przestępstw. W przypadku nieuczciwych praktyk najwięcej zdarzeń występuje w godz. 11:00-13:00. W godzinach wczesnoporannych i późnym wieczorem przestępstw tego typu jest znacznie mniej.  Zapewne wynika to z faktu, że wiążą się one z handlem, a sklepy w tych godzinach są zamknięte. 
+
+Podobnie zwizualizujemy jeszcze inne przestępstwa, do których dochodziło rzadziej.
+```{r}
+crime_types_by_hour %>%
+  filter(Type %in% c("PROSTITUTION", 
+                     "ARSON", "PUBLIC PEACE VIOLATION", "INTERFERENCE WITH PUBLIC OFFICER", "SEX OFFENSE")) %>%
+  ggplot(aes(x=hour, y=n, color= Type)) + 
+  geom_point() + 
+  geom_line(linewidth=1.1, alpha=0.7) + 
+  scale_y_continuous(limits = c(0,1000)) + 
+  expand_limits(y=0) + 
+  scale_x_continuous(breaks = seq(0, 23, 2), labels = function(x) paste(x, "00", sep=":")) + 
+  labs(title = "Liczba przestępstw w ciągu dnia",
+       subtitle = "Lata 2016-2020",
+       x = "Godzina",
+       y = "Liczba przestępstw",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw() + 
+  theme(legend.position = c(0.6, 0.75),
+        legend.background = element_rect(fill = "transparent", color = NA),
+        legend.box.background = element_rect(fill = "transparent", color = NA))  
+```
+
+Przestępstwa na tle seksualnym mają miejsce najczęściej w okolicach północy. Liczba przestępstw polegających na zakłócaniu pracy funkcjonariusza publicznego stopniowo wzrasta od godzin porannych, osiągając maksimum w godzinach wieczornych. Najwięcej przypadków prostytucji odnotowano w godzinach 20:00-21:00. Podpaleń było niewiele, ale widzimy wzrost liczby tych przestępstw w godzinach nocnych. 
+
+```{r}
+crime_locations_by_hour <- data %>%
+  mutate(hour = hour(Date)) %>%
+  group_by(hour, Location_Category) %>%
+  count()
+
+crime_locations_by_hour %>%
+filter(Location_Category%in% c("Residential", "Commercial", "Public Roads")) %>%
+ggplot(aes(x=hour, y=n, color= Location_Category)) + 
+  geom_smooth(method="loess", formula= y~x, alpha=0.25, se=F) + 
+  geom_point() + 
+  scale_y_continuous(breaks = seq(0, 2e4, 5e3), labels = function(x) x/1000) + 
+  expand_limits(y=0) + 
+  scale_x_continuous(breaks = seq(0, 23, 2), labels = function(x) paste(x, "00", sep=":")) + 
+  labs(title = "Liczba przestępstw w ciągu dnia",
+       subtitle = "Lata 2016-2020",
+       x = "Godzina",
+       y = "Liczba przestępstw (tys.)",
+       color = "Lokalizacja przestępstwa") + 
+  theme_bw()
+```
+
+Liczba przestępstw / wykroczeń dokonywanych w rejonach mieszkalnych i na publicznych ulicach / chodnikach była wyraźnie najniższa wczesnym rankiem. Najwięcej przestępstw w rejonach mieszkalnych dokonywano między północą a 1 w nocy oraz w południe - wtedy mieszkańców prawdopodobnie nie ma w domu. Przestępstw na ulicach najwuęcej było między 19:00 a 20:00. 
+
+
+```{r}
+crime_locations_by_hour %>%
+filter(Location_Category%in% c("Educational Institutions", "Public Transit", "Indoor Entertainment/Sports")) %>%
+ggplot(aes(x=hour, y=n, color= Location_Category)) + 
+  geom_line(linewidth=1.1, alpha=0.5) + 
+  geom_point() + 
+  expand_limits(y=0) + 
+  scale_x_continuous(breaks = seq(0, 23, 2), labels = function(x) paste(x, "00", sep=":")) + 
+  labs(title = "Liczba przestępstw w ciągu dnia",
+       subtitle = "Lata 2016-2020",
+       x = "Godzina",
+       y = "Liczba przestępstw",
+       color = "Lokalizacja przestępstwa") + 
+  theme_bw()
+```
+
+Przestępstwa w miejscach służących rekreacji i rozrywce mają miejsce najczęściej w godzinach 12:00-14:00, choć wieczorem wciąż utrzymują się na relatywnie wysokim poziomie. Najwięcej przestępstw w transporcie publicznym jest popełnianych między 17 a 18:00, kiedy ludzie wracają z pracy. Liczba przestępstw w placówkach edukacyjnych jest największa w godzinach, gdy zazwyczaj odbywają się lekcje / wykłady, czyli między 11:00 a 16:00. 
+
+### Liczba przestępstw w zależności od dnia tygodnia. 
+
+Na podstawie daty wyznaczamy dni tygodnia. 
+```{r}
+data$Weekday <- factor(weekdays(data$Date), 
+                        levels= c("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela"))
+```
+
+Wyznaczamy liczby przestępstw danego rodzaju w zależności od dni tygodnia.
+```{r}
+crimes_by_weekday <- data %>%
+  group_by(Weekday, Type) %>%
+  summarize(num_crimes = n(), .groups="drop")
+
+crimes_by_weekday %>%
+  filter(Type %in% c("THEFT", "BATTERY", "CRIMINAL DAMAGE", "DECEPTIVE PRACTICE")) %>%
+ggplot(aes(x=Weekday, y=num_crimes, color=Type, group=Type)) + 
+  geom_point() + 
+  geom_line(size=1.1, alpha=0.5) + 
+  scale_y_continuous(breaks = seq(0, 4e4, 1e4), labels = function(x) x/1000) + 
+  expand_limits(y=0) + 
+  labs(title = "Liczba przestępstw w zależności od dnia tygodnia",
+       subtitle = "Lata 2016-2020",
+       x = "Dzień tygodnia",
+       y = "Liczba przestępstw (tys.)",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw()
+```
+
+Liczba kradzieży oraz nieuczciwych praktyk spada w weekendy. Wzrastają natomiast liczby pobić i nieznacznie wzrasta liczba zgłoszeń uszkodzeń mienia. 
+```{r}
+crimes_by_weekday %>%
+  filter(Type %in% c("PROSTITUTION", 
+                     "ARSON", "PUBLIC PEACE VIOLATION",
+                     "INTERFERENCE WITH PUBLIC OFFICER",
+                      "OFFENSE INVOLVING CHILDREN")) %>%
+  ggplot(aes(x=Weekday, y=num_crimes, color= Type, group=Type)) + 
+  scale_x_discrete(labels = c("pon", "wt", "śr", "czw", "pt", "sob", "nd")) +
+  geom_point() + 
+  geom_line(size=1.1, alpha=0.7) + 
+  expand_limits(y=0) + 
+  labs(title = "Liczba przestępstw w zależności od dnia tygodnia",
+       subtitle = "Lata 2016-2020",
+       x = "Dzień tygodnia",
+       y = "Liczba przestępstw",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw()
+```
+
+W piątki zwyżkuje liczba przestępstw z udziałem nieletnich. W niedziele odnotowano więcej przypadków zakłóceń porządku publicznego. Najwięcej zgłoszonych przypadków prostytucji było w tygodniu, a w weekendy ta liczba malała. 
+
+```{r}
+crime_locations_by_weekday <- data %>%
+  group_by(Weekday, Location_Category) %>%
+  summarize(num_crimes = n(), .groups= "drop")
+
+crime_locations_by_weekday %>%
+  filter(Location_Category %in% c("Residential", "Commercial", "Public Roads")) %>% 
+  ggplot(aes(x=Weekday, y=num_crimes, color= Location_Category, group=Location_Category)) + 
+  geom_point() + 
+  scale_y_continuous(breaks = seq(0, 7e4, 1e4), labels = function(x) x/1000)+
+  geom_line(size=1.1, alpha=0.7) + 
+  expand_limits(y=0) + 
+  labs(title = "Liczba przestępstw w zależności od dnia tygodnia",
+       subtitle = "Lata 2016-2020",
+       x = "Dzień tygodnia",
+       y = "Liczba przestępstw (tys.)",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw()
+  
+```
+
+W weekendy odnotowujemy niewielki wzrost liczby przestępstw na drogach i chodnikach publicznych. 
+
+```{r}
+
+crime_locations_by_weekday %>%
+  filter(Location_Category %in% c("Educational Institutions", "Public Transit", "Parking",
+                                  "Indoor Entertainment/Sports", "Financial")) %>% 
+  ggplot(aes(x=Weekday, y=num_crimes, color= Location_Category, group=Location_Category)) + 
+  geom_point() + 
+  geom_line(size=1.1, alpha=0.7) + 
+  expand_limits(y=0) + 
+  labs(title = "Liczba przestępstw w zależności od dnia tygodnia",
+       subtitle = "Lata 2016-2020",
+       x = "Dzień tygodnia",
+       y = "Liczba przestępstw",
+       color = "Lokalizacja przestępstwa") + 
+  theme_bw()
+```
+
+W weekendy drastycznie spada liczba przestępstw w placówkach edukacyjnych, istotny spadek widać wtedy także dla przestępstw popełnianych na parkingach. Trochę mniej przestępstw jest popełnianych w weekendy w placówkach finansowych (banki, bankomaty, kantory). W obiektach sportowych i służących rozrywce maksymalną liczbę przestępstw odnotowuje się z kolei w soboty. 
+
+### Przeciętna liczba przestępstw w ciągu roku. 
+```{r}
+crime_types_by_day <- data %>%
+  mutate(year_day = yday(Date)) %>%
+  group_by(year_day, Type) %>%
+  summarize(num_crimes = n(), .groups = "drop")
+
+crime_types_by_day  %>%
+  mutate(year_day = as.Date(year_day, origin = "2020-01-01")) %>% # wykres nie przedstawia roku 2020 tylko sumę ze wszystkich lat
+  filter(Type %in% c("THEFT", "BATTERY", "CRIMINAL DAMAGE", "DECEPTIVE PRACTICE")) %>%
+ggplot(aes(x=year_day, y=num_crimes, color=Type, group=Type)) + 
+  geom_point(alpha=0.5) + 
+  geom_line(size=1.1, alpha=0.5) +
+  scale_x_date(breaks = seq(as.Date("2020-01-15"), as.Date("2020-12-30"), by = "1 month"),
+    labels = function(x) format(x, "%b") ) +
+  scale_y_continuous(breaks = seq(0, 1000, 250)) +
+  expand_limits(y=0) + 
+  labs(title = "Liczba przestępstw w ciągu roku",
+       subtitle = "Lata 2016-2020",
+       x = "Dzień tygodnia",
+       y = "Liczba przestępstw (tys.)",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+```
+
+Widzimy wzrost liczby kradzieży w miesiącach wakacyjnych, z najwyższą liczbą kradzieży odnotowywaną na końcu lipca - początku sierpnia. Wyższe temperatury powodują zapewne, że więcej osób jest na ulicach, co stwarza okazje dla kieszonkowców. Liczba pobić także wzrasta w cieplejszych miesiącach, choć wzrost nie jest tak duży, jak w przypadku kradzieży. Ciekawy jest też wyraźnie widoczny pik w liczbie nieuczciwych praktyk widoczny na początku każdego miesiąca.
+
+### Przestępstwa - jak zmieniały się na przestrzeni lat 2016-2020?
+
+Teraz przejdziemy do analizy liczby przestępstw w czasie. 
+```{r, warning=FALSE}
+
+# przestępstwa pogrupowane na miesiące kolejnych lat
+crimes_by_month_year <- data %>%
+  mutate(Month = my(paste(month(Date), year(Date), sep="-"))) %>%
+  group_by(Month, Type) %>%
+  summarize(num_crimes = n(), .groups = "drop")
+
+# przestępstwa pogrupowane wg numeru tygodnia (bez roku)
+crimes_by_week <- data %>%
+  mutate(Week = week(Date)) %>%
+  group_by(Week,  Type) %>%
+  summarize(num_crimes = n(), .groups = "drop", )
+
+# przestępstwa pogrupowane wg daty
+crimes_by_date <- data %>%
+  mutate(Date = date(Date)) %>%
+  group_by(Date, Type) %>%
+  summarize(num_crimes = n(), .groups = "drop") 
+
+# przestępstwa pogrupowane wg numeru tygodnia i roku - domyślnie z datą odpowiadającą poniedziałkowi danego tyg.
+crimes_by_week_year <- data %>%
+  mutate(
+  week = isoweek(Date),
+  year = isoyear(Date)
+) %>%
+  group_by(week, year, Type) %>%
+  summarize(num_crimes = n(), .groups = "drop") %>%
+  mutate(week_year = as.Date(paste(year, week, 1, sep = "-"), format = "%Y-%W-%u")) %>% arrange(week_year)
+
+# przestępstwa pogrupowane wg daty i godziny
+crimes_by_date_hour <- data %>%
+  mutate(date_hour = ymd_h(paste(date(Date), hour(Date), sep=", "))) %>%
+  group_by(date_hour, Type) %>%
+  summarize(num_crimes = n(), .groups = "drop")
+```
+
+Spróbujemy zwizualizować szereg czasowy - dla kilku wybranych typów przestępstw policzymy tygodniowe liczby zgłoszeń.
+```{r, warning=F}
+crimes_by_week_year %>%  
+  filter(Type %in% c("THEFT", "BATTERY", "CRIMINAL DAMAGE", "DECEPTIVE PRACTICE")) %>%
+  ggplot(aes(x=week_year, y=num_crimes, color=Type)) + 
+  geom_line(size=0.75, alpha=0.75) + 
+  scale_x_date(breaks = as.Date("2016-01-01") %m+% months(seq(0, 60, 6)), 
+               labels = function(x) format(x, "%Y-%m") ) +
+  labs(title = "Tygodniowa liczba przestępstw danego typu w czasie",
+       x = "Data", 
+       y = "Liczba przestępstw",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+```
+
+Z wykresu wynika, że prawdopodobnie liczba przestępstw charakteryzuje się sezonowością - 
+
+```{r}
+crimes_by_date %>%  
+  filter(Type %in% c("ROBBERY", "MOTOR VEHICLE THEFT", 
+                     "ASSAULT", "NARCOTICS", "BURGLARY", 
+                     "CRIMINAL DAMAGE")) %>%
+  ggplot(aes(x=Date, y=num_crimes, color=Type)) + 
+  geom_line(size=0.75, alpha=0.75) + 
+  scale_x_date(breaks = seq(as.Date("2016-01-01"), as.Date("2021-01-01"), by="12 months"),
+               labels = function(x) format(x, "%Y")) +
+  facet_wrap(~Type, scale="free", ncol=3) + 
+  labs(title = "Dzienna liczba przestępstw danego typu w czasie",
+       x = "Data", 
+       y = "Liczba przestępstw",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+```
+
+W okolicach 1 kwartału 2020 roku widzimy mocny spadek liczby przestępstw związanych z narkotykami. Być może było to spowodowane zamknięciem granic USA w związku z pandemią i trudniejszym nielegalnym importem narkotyków. Dla rabunków (robbery) i włamań (burglary), a także dla zniszczenia mienia (criminal damage) i kradzieży pojazdów widoczny jest ewidentny pik w okolicach końca 1 połowy 2020 roku. Przyjrzyjmy się bliżej temu fragmentowi szeregu czasowego.
+
+```{r}
+crimes_by_date %>%  
+  filter(Date >= "2020-05-15", Date <= "2020-06-01") %>%
+  filter(Type %in% c("ROBBERY", "MOTOR VEHICLE THEFT", "ASSAULT", "NARCOTICS", "BURGLARY", "CRIMINAL DAMAGE")) %>%
+  ggplot(aes(x=Date, y=num_crimes, color=Type)) + 
+  geom_line(size=0.75, alpha=0.75) + 
+  scale_x_date(breaks = seq(as.Date("2020-05-15"), as.Date("2020-06-01"), by="5 days"),
+               labels = function(x) format(x, "%m.%d")) +
+  facet_wrap(~Type, scale="free") + 
+  labs(title = "Dzienna liczba przestępstw danego typu w czasie",
+       subtitle = "2 poł. maja 2020 roku",
+       x = "Data", 
+       y = "Liczba przestępstw",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+```
+
+Pik wystąpił w dniu 31.05.2020. 25 maja świat obiegła informacja o zamordowaniu George Floyda przez amerykańskiego policjanta, w następnych dniach miała miejsce seria protestów. W Chicago największe demonstracje i zamieszki były właśnie 31 maja, miasto odnotowało wtedy 65 tys. telefonów na 911, w porównaniu ze średnią dzienną liczbą 15 tys.  
+
+Aby lepiej zobaczyć zmiany liczby przestępstw w czasie, zwizualizujemy dane obejmujące lata 2016-2019 (brak wpływu pandemii i brak obserwacji odstającej z 31 maja).
+
+```{r}
+crimes_by_date %>%  
+  filter(Type %in% c("ROBBERY", "THEFT", "ASSAULT", "NARCOTICS", "BURGLARY", "CRIMINAL DAMAGE")) %>%
+  filter(Date <= "2019-12-31") %>%
+  ggplot(aes(x=Date, y=num_crimes, color=Type)) + 
+  geom_line(size=0.75, alpha=0.75) + 
+  scale_x_date(breaks = seq(as.Date("2016-01-01"), as.Date("2021-01-01"), by="12 months"),
+               labels = function(x) format(x, "%Y")) +
+  facet_wrap(~Type, scale="free") + 
+  labs(title = "Dzienna liczba przestępstw danego typu w czasie",
+       x = "Data", 
+       y = "Liczba przestępstw",
+       color = "Rodzaj przestępstwa") + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+```
+
+Wygląda na to, że dla niektórych typów przestępstw (napaść, włamanie, zniszczenie mienia czy rabunek) występuje sezonowość - więcej zgłoszeń latem. 
+
+```{r}
+# dane do modelu
+arima_data <- crimes_by_month_year %>%
+  group_by(Month) %>%
+  summarize(num_crimes = sum(num_crimes))
+```
+
+## Część 3. Budowa modelu - ARIMA / SARIMA
+
+Celem tej części projektu będzie zbudowanie modelu ARIMA w celu zaprognozowania miesięcznej łącznej liczby przestępstw popełnionych w Chicago. Model możemy schematycznie zapisać jako:
+
+$ARIMA(p, d, q)$, gdzie $(p, d, q)$, to parametry części niesezonowej - odpowiadające odpowiednio za autokorelację (AR), opóźnienie (I, liczbę różnic wymaganych do uczynienia szeregu stacjonarnym) i średnią ruchomą (MA).
+
+Bardziej matematyczny zapis modelu to:
+$y_t' = c + \phi_1 y_{t-1}' + \phi_2 y_{t-2}' + \dots + \phi_p y_{t-p}' + \varepsilon_t - \theta_1 \varepsilon_{t-1} - \dots - \theta_q \varepsilon_{t-q}$, gdzie $y_t'$ to wartość szeregu zróżnicowanego $d$ razy, $\phi_1... \phi_p$ to parametry części autoregresyjnej, $\theta_1... \theta_q$ to parametry części średniej ruchomej.
+
+Jeśli w modelu uwzględniamy sezonowość, to wówczas schematyczny zapis jest następujący:
+$SARIMA(p, d, q)(P, D, Q)_m$, gdzie $(p, d, q)$ to parametry części niesezonowej (jak wyżej), a $(P, D, Q)$ to analogiczne parametry części sezonowej. $m$ odpowiada za długość okresu (dla okresu rocznego i szeregu miesięcznego $m$=12).
+
+### Stacjonarność
+
+Najpierw zajmijmy się kwestią stacjonarności szeregu czasowego. Jednym ze sposobów jej zweryfikowania jest rozszerzony test Dickeya-Fullera. 
+$H_0$: szereg czasowy jest niestacjonarny; $H_1$: szereg czasowy jest stacjonarny. 
+```{r, warning=FALSE}
+
+# funkcja do przeprowadzania rozszerzonego testu Dickey'a - Fullera
+test_stationarity_adf <- function(df, colname) {
+    test <- adf.test(df[[colname]])
+    return (data.frame(statystyka = round(test$statistic,2),
+                pvalue = round(test$p.value,2)))
+  
+}
+
+test_stationarity_adf(arima_data, "num_crimes")
+```
+
+Otrzymana p-wartość jest w rzeczywistości mniejsza od 0.01. R wyświetla ją jednak jako 0.01 z uwagi na fakt, że niskie wartości statystyki testowej nie są stablicowane i w związku z tym nie można podać dokładnej p-wartości (informuje o tym ostrzeżenie, które zostało wyciszone).
+
+To, czy szereg czasowy jest stacjonarny, można też zbadać za pomocą testu Kwiatkowskiego-Phillipsa-Schmidta-Shina. W tym teście hipotezy są przeciwne do tych w teście ADF. A zatem: $H_0$: szereg jest stacjonarny; $H_1$: szereg nie jest stacjonarny. 
+```{r}
+# funkcja do przeprowadzania testu KPSS
+test_stationarity_kpss <- function(df, colname) {
+    test <- kpss.test(df[[colname]]) 
+    
+    stat <- round(test$statistic, 3)
+  
+    return(data.frame(
+      statystyka = stat,
+      wart_krytyczna = 0.463
+    ))
+}
+test_stationarity_kpss(arima_data, "num_crimes")
+```
+
+Obliczona wartość statystyki przewyższa wartość krytyczną - zatem przyjmujemy $H_1$ o niestacjonarności. Sytuacja, w której wyniki obu testów nie są zbieżne, nie jest nietypowa. W takiej sytuacji uznajemy szereg za niestacjonarny i obliczamy pierwsze różnice: $y_t - y_{t-1}$ w celu uzyskania stacjonarności. 
+
+```{r}
+stationary <- arima_data %>%
+  mutate(diff_crimes = c(NA, diff(num_crimes))) %>%
+  filter(!is.na(diff_crimes))
+```
+
+Ponownie przeprowadzamy test Dickey'a Fullera i test KPSS w celu zweryfikowania, czy po takiej transformacji szereg jest już stacjonarny.
+
+```{r}
+test_stationarity_adf(stationary, "diff_crimes")
+```
+
+W teście Dickey'a Fullera bez zmian - różnicowanie daje podstawy do przyjęcia $H_1$ o stacjonarności. 
+
+```{r}
+test_stationarity_kpss(stationary, "diff_crimes")
+```
+
+Teraz również w teście KPSS nie ma podstaw do odrzucenia $H_0$ ($H_0$ - szereg jest stacjonarny, odwrotnie niż w teście ADF). Wnioskujemy zatem, że pierwsze różnice pozwoliły wyeliminować niestacjonarność. W związku z tym parametr $d$ w modelu ARIMA będzie równy 1.
+
+### PACF i ACF
+
+Następnym etapem jest sprawdzenie autokorelacji. Posłużą do tego dwa wykresy, wykres autokorelacji (ACF) i wykres autokorelacji częściowej (PACF). Pozwolą one ustalić wstępną postać modelu ARIMA. Oczywiście wykresy sporządzamy już dla stacjonarnego szeregu różnic. 
+
+```{r}
+ggtsdisplay((stationary[["diff_crimes"]]),
+main = "Monthly Differenced Time Series")
+```
+
+Istotny pik dla opóźnienia 2 w ACF sugeruje parametr q=2 (q odpowiada za komponent średniej ruchomej). Piki dla  dla opóźnień 2 i 4 w PACF sugerują parametr p=2 lub p=4 (p odpowiada za komponent autokorelacji). Obliczone zostały pierwsze różnice, dlatego d=1. Wstępnie przetestujemy zatem niesezonowe modele ARIMA z tymi parametrami. 
+
+Dodatkowo w ACF istotny jest też pik dla opóźnienia 6, 12 i 18-miesięcznego, co sugeruje sezonowość - spróbujemy z parametrem Q=1 dla okresu (cyklu) 6 i 12 miesięcznego. W PACF występują też piki dla 6 i (na granicy istotności) 12-miesięcznego opóźnienia, które mógłyby odpowiadać parametrowi P=1 dla okresu odpowiednio 6 i 12 miesięcznego. 
+
+Przetestujemy wszystkie kombinacje parametrów (dla modelu bez sezonowości i z jej uwzględnieniem - model SARIMA). Modele będą trenowane na szeregu czasowym obejmującym lata 2016-2018. Zbiór testowy będzie obejmował rok 2019 (roku 2020 nie uwzględniamy z uwagi na gwałtowny spadek przestępczości po wybuchu pandemii - jego uwzględnienie wpłynęłoby na testowe AIC i RMSE). 
+
+### Estymacja modelu ARIMA / SARIMA
+
+```{r}
+# parametry dla modelu ARIMA(p, d, q) - bez sezonowości 
+without_seasonality <- expand.grid(p=c(2, 4, 6), d = 1, q=2, P =0,D = 0, Q =0, period=0)
+
+# parametry dla modelu SARIMA(p, d, q)(P, D, Q) - z komponentem sezonowym
+with_seasonality <- expand.grid(p=c(2,4), d=1, q=2, P=c(0,1), D=c(0,1), Q=c(0, 1), period=c(6, 12))
+
+# ramka danych z testowanymi kombinacjami parametrów
+params <- rbind(with_seasonality, without_seasonality)
+
+# podział na dane treningowe i testowe
+train_data <- arima_data[year(arima_data$Month) %in% 2016:2018,][["num_crimes"]]
+test_data <- arima_data[year(arima_data$Month) %in% 2019:2020,][["num_crimes"]]
+
+# horyzont predykcji - roczny (czyli predykcja dla roku 2019 - nie 2020 przez wzgląd na pandemię)
+h <- 12
+
+results <- do.call(rbind, apply(params, 1, function(param_set){
+  p <- param_set["p"]
+  q <- param_set["q"]
+  d <- param_set["d"]
+  P <- param_set["P"]
+  Q <- param_set["Q"]
+  D <- param_set["D"]
+  period = param_set["period"]
+  
+  model <- Arima(train_data, order= c(p, d, q), seasonal = list(order= c(P, D, Q), period=period ),  )
+  result <- data.frame(p=p, d=d, q=q, P = P, D = D, Q =Q, period = period,
+    AIC = model$aic,
+    train_RMSE = sqrt(mean((train_data - fitted(model))^2)),
+    test_RMSE = sqrt(mean((test_data[1:h] - forecast(model, h)$mean)^2)))
+  }
+))
+
+results <- results %>% arrange(test_RMSE)
+results
+```
+
+Widzimy, że modele SARIMA uwzględniające sezonowość (niezerowe parametry P lub Q) osiągają niższe testowe RMSE od zwykłych modeli ARIMA.  Spośród przetestowanych kombinacji parametrów, testowe RMSE minimalizuje model $SARIMA(4,1,2)(1,0,0)_{12}$. Zauważmy jednak, że model $SARIMA(4,1,2)(0,1,1)_{12}$ ma testowe RMSE większe o jedynie około 8 jednostek, a jego AIC i treningowe RMSE są istotnie niższe (600 vs 391 dla AIC i 857 vs 547 dla treningowego RMSE). Mając to na uwadze, za najlepszy model uznajemy właśnie ten drugi: $SARIMA(4,1,2)(0,1,1)_{12}$. Wyświetlmy informacje o tym modelu. 
+```{r}
+model <- Arima(train_data, order= c(4, 1, 2), seasonal = list(order= c(0, 1, 1), period=12))
+summary(model)
+```
+
+Treningowe MAE sugeruje, że na zbiorze treningowym model myli się przeciętnie o około 355 jednostek, czyli o około 1,63% (MAPE). Sprawdzimy jeszcze istotność parametrów modelu. 
+```{r}
+library(lmtest)
+coeftest(model)
+```
+
+Jak widać, jedynie niesezonowy parametr autoregresyjny okazuje się być istotny statystycznie na poziomie istotności 5%. Zatem na obserwację $y_t$ istotny wpływ ma obserwacja $y_{t-1}$, ale już nie $y_{t-2}$, $y_{t-3}$ czy $y_{t-4}$. Na poziomie istotności 10% moglibyśmy jeszcze wnioskować o wpływie błędu $\varepsilon_{t-2}$ na $y_t$. 
+
+Spróbujmy wyestymować model AR(1), zawierający tylko parametr istotny statystycznie, aby porównać go z otrzymanym modelem SARIMA. 
+```{r}
+model_ar1 <- Arima(train_data, order=c(1, 0, 0))
+summary(model_ar1)
+```
+
+Model AR(1) jest gorszy od otrzymanego wcześniej modelu SARIMA - ma wyższe wartości zarówno MAPE i RMSE, jak i kryteriów informacyjnych (AIC, BIC).  
+
+Zatem najlepszy model to  $SARIMA(4,1,2)(0,1,1)_{12}$, postaci: 
+$y_t' = c + \phi_1 y_{t-1}' + \phi_2 y_{t-2}' + \phi_3 y_{t-3}' + \phi_4 y_{t-4}' + \varepsilon_t - \theta_1 \varepsilon_{t-1} -  \theta_2 \varepsilon_{t-2} + \Theta_1 \varepsilon_{t-12}$, gdzie $y_t'$ to wartość szeregu zróżnicowanego $d$ razy, $\phi_1... \phi_p$ to parametry części autoregresyjnej, $\theta_1... \theta_q$ to parametry przy błędach poprzednich predykcji (część niesezonowa), $\Theta_1$ odpowiada za uwzględnienie błędu predykcji sprzed 12 m-cy (część sezonowa).
+
+
+Sprawdzamy rozkład i autokorelację reszt dla najlepszego modelu. 
+```{r}
+checkresiduals(model)
+```
+
+Wykres ACF pokazuje brak istotnej autokorelacji reszt w finalnym modelu - to pożądana własność.  Potwierdza to też wysokie pvalue w teście Ljunga-Boxa (brak podstaw do odrzucenia $H_0$).
+
+Możemy również sprawdzić normalność reszt - wykorzystamy do tego test Shapiro-Wilka, w którym $H_0$: reszty mają rozkład normalny, $H_1$: reszty nie mają rozkładu normalnego. 
+```{r}
+shapiro.test(model$residuals)
+```
+
+Na 5% poziomie istotności odrzucamy $H_0$ i wnioskujemy, że reszty nie mają rozkładu normalnego. 
+
+Na koniec wizualizacja prognoz - zarówno in-sample, jak i out-of-sample. Na wykresie uwzględniamy rok 2020 - prognozy rozminęły się wtedy z rzeczywistością z uwagi na pandemię i obserwowany spadek przestępczości.  
+```{r}
+# horyzont prognozy
+h <- 24
+   
+# prognoza out-of-sample            
+pred_values <- forecast(model, h=h)$mean
+
+# wektor połączonych prognoz in-sample i out-of-sample
+pred = c(fitted(model), pred_values)
+
+train_test_labels =  c(rep("train", times = length(train_data)), rep("test", times = h))
+
+df <- cbind(arima_data, pred, train_test_labels)
+
+ggplot(df, aes(x = Month, y = num_crimes)) + 
+  geom_point(color = "lightblue") + 
+  geom_line(color = "lightblue") + 
+  geom_point(aes(y = pred, alpha = train_test_labels), color = "red") + 
+  geom_line(aes(y = pred, linetype = train_test_labels, alpha = train_test_labels), color = "red") + 
+  scale_linetype_manual(values = c("train" = "solid", "test" = "dashed")) +
+  scale_alpha_manual(values = c("train" =  0.8, "test" =  0.5)) +
+  scale_y_continuous(limits = c(0, 26e3), breaks = seq(0, 25e3, 5e3), labels = function(x) x/1000) +
+  theme_bw() + 
+  labs(
+    title = "Miesięczna liczba przestępstw ogółem",
+    subtitle = "Prognoza vs prawdziwa wartość",
+    x = "Rok",
+    y = "Liczba przestępstw (tys.)",
+    alpha = "Typ prognozy",
+  )  + guides(linetype = "none")
+```
